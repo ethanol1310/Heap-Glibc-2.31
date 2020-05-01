@@ -1,0 +1,351 @@
+I. HOUSE OF MIND
+** Turn off tcache
+1. Glibc code to exploit 
+# if __WORDSIZE == 32
+#  define DEFAULT_MMAP_THRESHOLD_MAX (512 * 1024)
+# else
+#  define DEFAULT_MMAP_THRESHOLD_MAX (4 * 1024 * 1024 * sizeof(long))
+# endif
+
+# ifdef DEFAULT_MMAP_THRESHOLD_MAX
+#  define HEAP_MAX_SIZE (2 * DEFAULT_MMAP_THRESHOLD_MAX) // 2 * 4 * 1024 * 1024 * sizeof(long)
+# else
+#  define HEAP_MAX_SIZE (1024 * 1024) /* must be a power of two */
+# endif
+
+typedef struct _heap_info { -> heap header
+  mstate ar_ptr; /* Arena for this heap. */
+  struct _heap_info *prev; /* Previous heap. */
+  size_t size;   /* Current size in bytes. */
+  size_t pad;    /* Make sure the following data is properly aligned. */
+} heap_info;
+
+struct malloc_state -> arena header
+{
+	mutex;	   // 4 bytes	\x00\x00\x00\x00
+	int flags; // 4 bytes	\x02\x00\x00\x00
+	int have_fastchunks; // 4 bytes ?? // bool \x00\x00\x00\x00
+	--- padding 4 bytes ??? ---
+	mfastbinptr fastbinsY[NFASTBINS]; 10 fastbins 80bytes 
+	mchunkptr top; // 8 bytes
+	mchunkptr last_remainder; // 8 bytes
+	mchunkptr bins[NBINS * 2 - 2]; // 2032 bytes
+	unsigned int binmap[BINMAPSIZE]; // 16 bytes
+	struct malloc_state *next; // 8 bytes
+	struct malloc_state *next_free; // 8 bytes
+	INTERNAL_SIZE_T attached_threads; // 8 bytes
+
+  /* Memory allocated from the system in this arena.  */
+  	INTERNAL_SIZE_T system_mem; // 8 bytes 
+  	INTERNAL_SIZE_T max_system_mem; // 8 bytes
+}
+
+void _int_free(mstate av, Void_t* mem) {
+      .....
+      bck = unsorted_chunks(av); // bck = &av->bins[0] 
+      fwd = bck->fd; // *(&av->bins[0] + 16) = WHERE_2_WRITE - 24
+      p->bk = bck; 
+      p->fd = fwd;
+      bck->fd = p;
+      fwd->bk = p; // *(&av->bins[0] + 16) + 24 = p -> WHERE_2_WRITE = WHAT 
+      .....
+}
+
+bck = &av->bins[0] 	---
+		   	---
+			--- bck->fd  // WHERE_2_WRITE - 24
+ -----------------------------|
+ |
+fwd = WHERE_2_WRITE - 24---
+			---	
+			--- fwd->bk = p // WHERE_2_WRITE = WHAT
+
+2. Bypass check
+2.1 flags = 0x02
+2.2 size of chunk p -> NON_MAIN_ARENA is actived
+
+3. Protect 
+if (__glibc_unlikely (fwd->bk != bck))
+	malloc_printerr ("free(): corrupted unsorted chunks");
+
+4. How to exploit
+0x4000000 -> 64bit: HEAP_MAX_SIZE 
+0x700000  -> heap_for_ptr(ptr) -> error
+
+change HEAP_MAX_SIZE -> 1024 * 1024 
+
+ return heap_for_ptr(ptr)->ar_ptr | ret (0x700000)->ar_ptr = 0x6aba70 
+ -------------------------------- | --------------------------------------
+ ar_ptr = arena_for_chunk(p);     | ar_ptr = 0x6aba70
+ ...                              |
+ _int_free(ar_ptr, mem);          | _int_free(0x6aba70, 0x700350); 
+0x6aba80
+|
+[Ax16][0x4][\x02\x00\x00\x00][\x00\x00\x00\x00\x00\x00\x00\x00][24xA][0x701000]
+	|    |			|					|
+    mutex   flags	      have_fastchunks			      bins[0]
+
+(&1st chunk + 16) = 0x6aba80
+ |
+0x700000
+
+gef➤  print av
+$2 = (mstate) 0x6aba80
+gef➤  print bck
+$3 = (mchunkptr) 0x6abae0 -> av->top ???
+gef➤  print bck->fd
+$4 = (struct malloc_chunk *) 0x700340
+gef➤  print av->bins[0]
+$5 = (mchunkptr) 0x700340
+gef➤  print &av->bins[0]
+$6 = (mchunkptr *) 0x6abaf0
+
+
+5. PoC
+mind.c
+exp.c
+glibc 2.31
+
+I.i Fastbin method
+1. Glibc code to exploit
+old GLIBC 
+if ((unsigned long)(size) <= (unsigned long)(av->max_fast)) {
+   if (__builtin_expect (chunk_at_offset (p, size)->size <= 2 * SIZE_SZ, 0)
+	|| __builtin_expect (chunksize (chunk_at_offset (p, size))
+			     >= av->system_mem, 0))
+      {
+	errstr = "free(): invalid next size (fast)";
+	goto errout;
+      }
+
+    set_fastchunks(av);
+    fb = &(av->fastbins[fastbin_index(size)]); // fb -> EIP
+    if (__builtin_expect (*fb == p, 0))
+      {
+	errstr = "double free or corruption (fasttop)";
+	goto errout;
+      }
+    printf("\nbDebug: p = 0x%x - fb = 0x%x\n", p, fb);
+    p->fd = *fb;
+    *fb = p;
+  }
+
+GLIBC 2.31
+ if (__builtin_expect (chunksize_nomask (chunk_at_offset (p, size))
+			  <= 2 * SIZE_SZ, 0)
+	|| __builtin_expect (chunksize (chunk_at_offset (p, size))
+			     >= av->system_mem, 0))
+      {
+	------------------------------snip----------------------------------
+      }
+
+    free_perturb (chunk2mem(p), size - 2 * SIZE_SZ);
+
+    atomic_store_relaxed (&av->have_fastchunks, true);
+    unsigned int idx = fastbin_index(size); //  ((((unsigned int) (sz)) >> (SIZE_SZ == 8 ? 4 : 3)) - 2)
+                                            //  ((((unsigned int) (sz)) >> 4) - 2)
+    fb = &fastbin (av, idx); // (ar_ptr)->fastbinsY[idx]
+
+    /* Atomically link P to its fastbin: P->FD = *FB; *FB = P;  */
+    mchunkptr old = *fb, old2; // struct malloc_chunk *old = *fp, old2;
+
+    if (SINGLE_THREAD_P)
+      {
+	/* Check that the top of the bin is not the record we are going to
+	   add (i.e., double free).  */
+	if (__builtin_expect (old == p, 0))
+	  malloc_printerr ("double free or corruption (fasttop)");
+	p->fd = old; // p->fd = *fp
+	*fb = p;
+      }
+
+2. Bypass check
+if ((unsigned long)(size) <= (unsigned long)(get_max_fast ()) // 80 * SIZE_SZ / 4  = 160
+-> NON_MAIN_ARENA -> modify ar_ptr
+-> PREV_INUSE ->
+
+if (__builtin_expect (chunksize_nomask (chunk_at_offset (p, size))
+			  <= 2 * SIZE_SZ, 0)
+-> nextchunk->size > 16 bytes
+	|| __builtin_expect (chunksize (chunk_at_offset (p, size))
+			     >= av->system_mem, 0))
+-> Most complicated step
+-> av->system_mem beyond 2184 bytes (malloc_state) -> use stack 
+
+3. Protect 
+
+4. How to exploit
+Fake arena = address of EBP on stack
+[address of EBP on stack]
+ 	|
+	0x700000
+
+address of EBP - 8      -> 4 bytes flags + 4 bytes mutex
+address of EBP 		-> av->have_fastchunks
+address of EBP + 8 (EIP)-> av->fastbinY[0]
+			 	    |
+			------------
+			|
+// -> fp -> *fp = p -> &shellcode
+..................
+address of EBP - 8 + 2184 -> av->system_mem // av->system_mem < chunk_at_offset(p, size)
+
+5. PoC
+
+II. HOUSE OF SPIRIT
+1. Glibc code to exploit 
+** The goal is to overwrite
+a pointer that was previously allocated with a call to "malloc()" so
+that when this is passed to free(), an arbitrary address will be stored
+in a "fastbin[]".
+
+2. Bypass check
+nextchunksize >= av->system_mem
+
+3. Protect 
+
+4. How to exploit
+4.1. Fake chunk at arbitrary address 
+4.2. Overflow address of chunk 
+4.3. Free fake chunk
+4.4. Malloc -> allocated at fake chunk
+4.5. Overflow EIP
+
+Fake chunk -> Free fake chunk(store in fastbins) -> malloc fake chunk (WHERE) -> overwrite WHERE with WHAT
+5. PoC
+
+III. HOUSE OF FORCE
+1. Glibc code to exploit 
+      victim = av->top;
+      size = chunksize (victim);
+
+      if (__glibc_unlikely (size > av->system_mem))
+        malloc_printerr ("malloc(): corrupted top size");
+
+      if ((unsigned long) (size) >= (unsigned long) (nb + MINSIZE))
+        {
+          remainder_size = size - nb;
+          remainder = chunk_at_offset (victim, nb); // 
+          av->top = remainder; // EIP - victim = np
+          set_head (victim, nb | PREV_INUSE |
+                    (av != &main_arena ? NON_MAIN_ARENA : 0));
+          set_head (remainder, remainder_size | PREV_INUSE);
+
+          check_malloced_chunk (av, victim, nb);
+          void *p = chunk2mem (victim);
+          alloc_perturb (p, bytes);
+          return p;
+        }
+
+2. Bypass check
+
+3. Protect 
+if (__glibc_unlikely (size > av->system_mem))
+       malloc_printerr ("malloc(): corrupted top size");
+
+4. How to exploit
+4.1 Overwrite size of top chunk with 0xffffffffffffffff
+4.2 Allocate the desired memory area
+-> address of memory to be allocated - chunk header size - top chunk address - chunk header size
+4.3 Address of the memory to be allocated is stored in the top chunk
+4.4 Requesting memory allocation to malloc() returns that memory
+
+For example: 
+address of EIP -> 0x7fffffffde28
+av->top -> 0x6aff90
+Adress of memory to be allocated -> 0x7fffffffde20 - 0x6aff90 - 0x20
+run 140737481334384 $(python -c "print '\xff'*1312")
+
+** 3 conditions
+1 - one overflow in a chunk that allows to overwrite the Wilderness
+2 - A call to "malloc()" with size field derfined by designer
+3 - Another call to "malloc()" where data can be handled by designer
+The ultimate goal is to get a chunk placed in an arbitrary memory. This
+position will be obtained by the last call to "malloc()".
+
+5. PoC
+
+IV. HOUSE OF LORE
+1. Glibc code to exploit 
+** House of Lore is an attack using malloc() rellocating chunks corresponding to small bins
+and placing them in small bins.
+ if (in_smallbin_range (nb))
+    {
+      idx = smallbin_index (nb); 
+      bin = bin_at (av, idx); 
+
+      if ((victim = last (bin)) != bin)
+        {
+          bck = victim->bk;
+	  if (__glibc_unlikely (bck->fd != victim))
+	    malloc_printerr ("malloc(): smallbin double linked list corrupted");
+          set_inuse_bit_at_offset (victim, nb);
+          bin->bk = bck;
+          bck->fd = bin;
+
+          if (av != &main_arena)
+	    set_non_main_arena (victim);
+          check_malloced_chunk (av, victim, nb);
+	  void *p = chunk2mem (victim);
+          alloc_perturb (p, bytes);
+          return p;
+        }
+    }
+
+if (in_smallbin_range (size))
+{
+       victim_index = smallbin_index (size);
+       bck = bin_at (av, victim_index);
+       fwd = bck->fd;
+}
+
+mark_bin (av, victim_index);
+victim->bk = bck;
+victim->fd = fwd;
+fwd->bk = victim;
+bck->fd = victim;
+
+2. Bypass check
+ if (__glibc_unlikely (bck->fd != victim))
+	    malloc_printerr ("malloc(): smallbin double linked list corrupted");
+
+2.1 Structure of a free chunk, two fake chunks
+2.2 Store the pointer of the first fake chunk in bk of the free chunk
+2.3 The pointer of bins[idx] is stored in fd of the first fake chunk
+2.4 Store the pointer of the second fake chunk in the bk of the first fake chunk
+2.5 The pointer of the first fake chunk is stored in fd of the second fake chunk
+
+3. Protect 
+
+4. How to exploit
+4.1 Write a fake free chunk on the stack and allocated memory corresponding to the small bin
+4.2 Free that memory to make it free chunk
+4.3 When a new memory allocation request is made, a free chunk is placed in Bins[]
+4.3 Overwrite the Fake chunk's pointer to the free chunk 's bk
+4.4 If you request malloc() to allocate a chunk placed in a small bin, the starting address of 
+fake chunk is placed in Bins[]
+4.5 If you ask malloc () for the same size of memory allocation, it returns a pointer corresponding to the area of ​​the Fake chunk.
+4.6 The returned pointer is Stack memory
+
+5. PoC
+5.1 Fake chunk is created on the stack and free chunk is created and then the chunk is placed in a small bin.
+5.2 And the pointer of the fake chunk is stored in the bk of the free chunk.
+5.3 If you ask malloc() to allocate memory to reassign that chunk, the allocator places the fake chunk 
+in a small bin.
+5.4 If the attacker once again requests the same size of memory allocation, the llocator returns the 
+memory of the fake chunk.
+
+V. HOUSE OF UNDERGROUND
+1. Glibc code to exploit 
+
+2. Bypass check
+
+3. Protect 
+
+4. How to exploit
+
+5. PoC
+
+Reference:
+http://phrack.org/issues/61/6.html
+

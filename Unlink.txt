@@ -1,0 +1,53 @@
+I. Unlink
+1. Glibc code to exploit 
+Name: unlink
+{
+BK = *(P + 24);
+FD = *(P + 16);
+*(FD + 24) = BK; return_address = address of shellcode
+*(BK + 16) = FD; return_address = address of shellcode
+}
+
+2. Protect unlink
+if (chunksize (p) != prev_size (next_chunk (p)))
+  malloc_printerr ("corrupted size vs. prev_size");
+
+if (__builtin_expect (fd->bk != p || bk->fd != p, 0))
+  malloc_printerr ("corrupted double-linked list");
+
+3. Protect forward
+if (__builtin_expect ((uintptr_t) p > (uintptr_t) -size, 0)
+     || __builtin_expect (misaligned_chunk (p), 0))
+    malloc_printerr ("free(): invalid pointer");
+
+if (__glibc_unlikely (size < MINSIZE || !aligned_OK (size)))
+    malloc_printerr ("free(): invalid size");
+
+4. PoC
+pocUnlink.c
+glibc-2.31
+
+5. How to exploit
+1. Allocate two adjacent chunks, overflow happens on the first one
+so that we could totally control the second one.
+
+2. Control the metadata of the first chunk
+2.0 Set size of the first chunk (nextchunk) to -32
+if (__builtin_expect (chunksize_nomask (nextchunk) <= 2 * SIZE_SZ, 0) // -> nextchunk->size > 16
+	|| __builtin_expect (nextsize >= av->system_mem, 0))
+      malloc_printerr ("free(): invalid next size (normal)");
+
+2.1 Set prev_size to 1 to pass check:
+ if (__glibc_unlikely (!prev_inuse(nextchunk))) // -> set prev_inuse 
+      malloc_printerr ("double free or corruption (!prev)");
+2.3 Change FD in the first chunk's metadata to $what_2_write
+2.4 Change BK in the first chunk's metadata to our $where_2_write - 16
+
+3. Control the metadata of the second chunk
+3.1 size = - (second_chunk - first_chunk) & ~(IS_MMAP|NON_MAIN_ARENA)) | PREV_INUSE; // advoid backward
+
+3. Control flow will redirected to our shellcode.
+
+Reference:
+http://phrack.org/issues/61/6.html
+

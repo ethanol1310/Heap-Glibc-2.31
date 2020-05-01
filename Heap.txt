@@ -1,0 +1,123 @@
+I. Build Glibc
+1. Configuring 
+cd glibc
+mkdir ../build_glibc
+cd ../build_glibc
+../glibc-2.31/configure
+mkdir ../install_glibc
+../glibc-2.31/configure --prefix=/home/ethanol/Desktop/install_glibc/
+2. Compiling
+make -j 16
+3. Installing
+make install
+
+https://sys.readthedocs.io/en/latest/doc/03_glibc.html#glibc-2-24-stdlib-div-c
+https://stackoverflow.com/questions/10763394/how-to-build-a-c-program-using-a-custom-version-of-glibc-and-static-linking/10772056#10772056
+II. How to learn heap exploitation
+1. Glibc code to exploit.
+	- Name
+	- Flow chart
+2. How to protect this exploitation technique.
+3. How to exploit.
+	- Build glibc
+	- Test technique in gdb
+
+III. Heap 
+https://medium.com/@c0ngwang/the-art-of-exploiting-heap-overflow-part-4-4f1140585210
+Ptmalloc overview
+3 layer manage 
+1. Arena
+sbrk() - backed main arena
+mmap() - backed thread arena
+struct malloc_state - header
+2. Internal Heap
+Internal heap: a single contiguous memory region recording each
+mmap() we call to grow the arena.
+heap_info - header
+3. Chunk
+Final contiguous memory area returned by malloc()
+Free chunks are chained in vaarious way, depends on its size.
+Its header is defined as struct malloc_chunk in glibc.
+-> This is what the attack surface is.
+
+IV. Memory chunks
+
+struct malloc_chunk {
+
+  INTERNAL_SIZE_T      mchunk_prev_size;  /* Size of previous chunk (if free).  */
+  INTERNAL_SIZE_T      mchunk_size;       /* Size in bytes, including overhead. */
+
+  struct malloc_chunk* fd;         /* double links -- used only if free. */
+  struct malloc_chunk* bk;
+
+  /* Only used for large blocks: pointer to next larger size.  */
+  struct malloc_chunk* fd_nextsize; /* double links -- used only if free. */
+  struct malloc_chunk* bk_nextsize;
+};
+fd -> next
+bk -> prev
+
+1. How does an arena manages free chunks?
+Take a look at the core of an arena header:
+
+struct malloc_state
+{
+  /* Serialize access.  */
+  __libc_lock_define (, mutex);
+
+  /* Flags (formerly in max_fast).  */
+  int flags;
+
+  /* Set if the fastbin chunks contain recently inserted free blocks.  */
+  /* Note this is a bool but not all targets support atomics on booleans.  */
+  int have_fastchunks;
+
+  /* Fastbins */
+  mfastbinptr fastbinsY[NFASTBINS];
+
+  /* Base of the topmost chunk -- not otherwise kept in a bin */
+  mchunkptr top;
+
+  /* The remainder from the most recent split of a small request */
+  mchunkptr last_remainder;
+
+  /* Normal bins packed as described above */
+  mchunkptr bins[NBINS * 2 - 2];
+};
+
+Memory chunks are not allocated directly by OS one by one each time, instead glibc caches them by:
+
+1. Get a bigger chunk from OS or from an existing chunk in a freelist, split it and return the requested-size
+chunk to user and keep the remainder chunk.
+2. When users free a memory chunk, do not return it to OS immediately, keep it in a freelist instead.
+
+First case: top chunk, the rest of an arena, top of an arena
+Second case: depends on the size of the chukn
+1. Fast bins: fastbinsY[], LIFO order
+They are fast because chunks there are not coalesced or sorted (code)
+fastbinsY[0] - fastbinsY[9]: 16, 24, 32...80 (real chunks size = size - 4)
+
+2. Normal bins: 
+2.1 Unsorted bins: bins[1], doubly linked list, various sizes
+Temporary bin which holds the chunks being moved to either small bins or large bins.
+Mainly for reuse.
+
+2.2 Small bins: bins[2] ~ bins[63], doubly linked list, 8 ~ 496 bytes.
+Similar to fast bins, but these chunks could be coalesced if adjacent.
+
+2.3 Large bins: bins[64] ~ bins[126], a different range of sizes, 
+sorted in decreasing order and coalesced if necessary, 512 ~ 128Kbytes
+32 bins 64
+16 bins 512
+8  bins 4096
+4  bins 32768
+2  bins 262144
+1  bin  what 's left
+
+Chunks larger than 128KB are directly allocated by mmap()
+
+V. Tcache
+
+
+
+

@@ -1,0 +1,31 @@
+Once upon a free
+
+Once we free() the chunk, using free(mem), some checks take place and the
+memory is released. If its neighbour blocks are free, too (checked using
+the PREV_INUSE flag), they will be merged to keep the number of reuseable
+blocks low, but their sizes as large as possible. If a merge is not
+possible, the next chunk is tagged with a cleared PREV_INUSE bit, and the
+chunk changes a bit:
+             +----------------------------------+
+    chunk -> | prev_size                        |
+             +----------------------------------+
+             | size                             |
+             +----------------------------------+
+      mem -> | fd                               |
+             +----------------------------------+
+             | bk                               |
+             +----------------------------------+
+             | (old memory, can be zero bytes)  |
+             :                                  :
+
+nextchunk -> | prev_size ...                    |
+             :                                  :
+
+Every time a new free
+is issued, the list will be checked, and possibly unconsolidated blocks
+are merged. The whole memory gets defragmented from time to time to release
+some memory.
+
+If there is old data remaining behind the 'bk' pointer, it
+remains unused until it gets malloc'd again.
+

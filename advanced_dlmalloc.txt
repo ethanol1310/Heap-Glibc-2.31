@@ -1,0 +1,41 @@
+Advanced Dlmalloc exploits
+
+- Ability to overwrite an almost arbitrary 4 byte value at any location
+- Constructed on top of the unlink() basic technique
+- unlink() is used to force specifi information leaks of the target process memory layout.
+The obtained information is used to exploit the target without any prior knowledge or hardcore
+values, even when randomization of main object's and/or libraries' load address is present.
+
+Several tricks will be presented along different scenarios, including:
+* special chunks crafting
+* heap layout consciousness and analysis using debugging tools
+* automatically finding the injected shellcode in the process memory
+* forcing a remote process to provice malloc's internal structures addresses
+* looking for a function pointer within glibc
+* injecting the shellcode into a known memory address
+
+1. Introduction
+almost arbitrary 4 bytes mirrors overwrite - aa4bmo -> build higher level techniques
+
+                   malloc                         higher
+vulnerability  ->  structures  ->  primitive  ->  level
+                   corruption                     techniques
+---------------------------------------------------------------------------
+heap overflow         unlink()                       freeing the output
+double free()  ->  technique   ->  aa4bmo     ->  hitting the output
+...                                               cushion chunk
+                                                  ...
+
+2. The techniques
+2.1 aa4mo primitive 
+2.1.1 First unlinkMe chunk
+
+ -4        -4      what     where-8    -11      -15      -19    ...
+|--------|--------|--------|--------|--------|--------|--------|...
+ sizeB    sizeA    FD       BK
+ ----------- nasty chunk -----------|--------|-------------------->
+
+We just need a free() call to hit our block after the (X) point to overwrite 'where' with 'what'
+When free() is called the following sequence takes place:
+- int_free() tries to look 
+
