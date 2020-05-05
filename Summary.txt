@@ -1,0 +1,44 @@
+
+Kỹ thuật exploit các house: 
+- aa4mo overwrite data ở địa chỉ bất kỳ ít nhất 4 bytes
+-> thông qua 1 chuỗi các phép gán sau khi metadata bị thay đổi
+- Malloc arbitrary memory or fake chunk để overwrite EIP của function
+-> thông qua 1 chuỗi malloc, free kết hợp với aa4mo 
+
+Summary:
+
+- House kết hợp những operator để làm xuất hiện các state bất thường trong metadata khi metadata bị overflow.
+- Bug xuất hiện khi algorithm không có các phép check trước khi operator xử lý data structure.
+- Cách để protect là thêm các phép check metadata để ngăn operator làm xuất hiện các state bất thường.
+- Các operator duy trì linked list như insert, delete dễ xuất hiện các bug có khả năng aa4mo. Thực hiện một chuỗi gán liên tục có liên quan 
+đến 1 vài pointer để duy trì tính chất của linked list mà không có phép check nào.
+
+
+Analysis
+
+1. Data structure
+
+2. Algorithm
+2.1 Draw work flow
+2.2 Analyse work flow 
+
+3. Build 
+
+4. Debug
+4.1 Debug các nhánh của work flow 
+4.1.1 Note lại những dòng code đã đi qua của từng nhánh
+4.1.2 Sự thay đổi của data structure
+4.1.2.1 Vẽ work flow các cách bypass 
+4.1.2.2 Đưa ra giả thiết
+
+4.2 Viết PoC kiểm tra giả thiết
+
+5. How to protect
+
+
+
+
+
+
+
+
